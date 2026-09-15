@@ -37,7 +37,31 @@ from scoring import comfort_score, flag_anomalies, FEATURE_COLS
 WEATHER_URL = "https://api.open-meteo.com/v1/forecast"
 AIR_QUALITY_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
 FORECAST_HOURS = 48
-REQUEST_TIMEOUT = 20
+REQUEST_TIMEOUT = 25
+MAX_ATTEMPTS = 4          # retries per HTTP call before giving up on a city
+RETRY_BASE_DELAY = 4      # seconds; grows each attempt (4s, 8s, 12s, ...)
+CITY_PAUSE = 2.5          # seconds between cities -- gentler on the free API's rate limit
+
+
+def _get_with_retry(url, params):
+    """GET with retries + backoff. Free public APIs like Open-Meteo can
+    rate-limit bursts of requests (this shows up as a run of cities failing
+    together, then a run succeeding, repeating) -- retrying with a short
+    backoff rides out a temporary block instead of just giving up on that
+    city for the whole hour."""
+    last_err = None
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            r = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+            r.raise_for_status()
+            return r
+        except requests.RequestException as e:
+            last_err = e
+            status = getattr(getattr(e, "response", None), "status_code", "n/a")
+            print(f"    ! attempt {attempt}/{MAX_ATTEMPTS} failed (status={status}): {e}")
+            if attempt < MAX_ATTEMPTS:
+                time.sleep(RETRY_BASE_DELAY * attempt)
+    raise last_err
 
 
 def get_engine():
@@ -69,7 +93,7 @@ def upsert_cities(engine):
 
 def fetch_city_forecast(lat: float, lon: float) -> pd.DataFrame | None:
     try:
-        w = requests.get(
+        w = _get_with_retry(
             WEATHER_URL,
             params={
                 "latitude": lat,
@@ -78,12 +102,10 @@ def fetch_city_forecast(lat: float, lon: float) -> pd.DataFrame | None:
                 "forecast_days": 2,
                 "timezone": "UTC",
             },
-            timeout=REQUEST_TIMEOUT,
         )
-        w.raise_for_status()
         wj = w.json()["hourly"]
 
-        a = requests.get(
+        a = _get_with_retry(
             AIR_QUALITY_URL,
             params={
                 "latitude": lat,
@@ -92,12 +114,10 @@ def fetch_city_forecast(lat: float, lon: float) -> pd.DataFrame | None:
                 "forecast_days": 2,
                 "timezone": "UTC",
             },
-            timeout=REQUEST_TIMEOUT,
         )
-        a.raise_for_status()
         aj = a.json()["hourly"]
     except requests.RequestException as e:
-        print(f"  ! request failed: {e}")
+        print(f"  ! request failed after {MAX_ATTEMPTS} attempts: {e}")
         return None
     except (KeyError, ValueError) as e:
         print(f"  ! unexpected API response shape: {e}")
@@ -221,7 +241,7 @@ def run():
         n_anom = int(df["is_anomaly"].sum())
         print(f"  wrote {len(df)} rows ({n_anom} flagged anomalous)")
 
-        time.sleep(0.5)  # be polite to the free API
+        time.sleep(CITY_PAUSE)  # be polite to the free API's rate limit
 
     print("Done.")
 
