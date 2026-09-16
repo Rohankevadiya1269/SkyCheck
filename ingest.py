@@ -80,14 +80,17 @@ def upsert_cities(engine):
             conn.execute(
                 text(
                     """
-                    INSERT INTO cities (name, country, lat, lon)
-                    VALUES (:name, :country, :lat, :lon)
-                    ON CONFLICT (name, country) DO NOTHING
+                    INSERT INTO cities (name, country, lat, lon, tz)
+                    VALUES (:name, :country, :lat, :lon, :tz)
+                    ON CONFLICT (name, country) DO UPDATE SET
+                        lat = EXCLUDED.lat,
+                        lon = EXCLUDED.lon,
+                        tz  = EXCLUDED.tz
                     """
                 ),
                 c,
             )
-        rows = conn.execute(text("SELECT id, name, country, lat, lon FROM cities")).mappings().all()
+        rows = conn.execute(text("SELECT id, name, country, lat, lon, tz FROM cities")).mappings().all()
     return {(r["name"], r["country"]): r["id"] for r in rows}, rows
 
 
