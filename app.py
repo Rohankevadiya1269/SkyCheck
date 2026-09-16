@@ -12,6 +12,9 @@ set DATABASE_URL in the app's Secrets. See README.md for the full walkthrough.
 """
 
 import os
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text
@@ -34,7 +37,7 @@ def get_engine():
 def load_cities():
     engine = get_engine()
     with engine.begin() as conn:
-        df = pd.read_sql(text("SELECT id, name, country FROM cities ORDER BY name"), conn)
+        df = pd.read_sql(text("SELECT id, name, country, tz FROM cities ORDER BY name"), conn)
     return df
 
 
@@ -91,12 +94,22 @@ city_labels = [f"{r['name']}, {r['country']}" for _, r in cities_df.iterrows()]
 choice = st.selectbox("City", city_labels, index=city_labels.index("Chicago, USA") if "Chicago, USA" in city_labels else 0)
 city_row = cities_df.iloc[city_labels.index(choice)]
 
+# All times below are converted from the UTC timestamps stored in the
+# database into this city's own local time -- see "How this works" below.
+try:
+    city_tz = ZoneInfo(city_row["tz"] or "UTC")
+except Exception:
+    city_tz = ZoneInfo("UTC")
+
+st.caption(f"Local time in {city_row['name']}: {datetime.now(city_tz).strftime('%a %I:%M %p %Z')}")
+
 readings = load_readings(int(city_row["id"]))
 
 if readings.empty:
     st.warning("No forecast data for this city yet -- the hourly ingestion job may not have run yet.")
     st.stop()
 
+readings["ts_local"] = readings["ts"].dt.tz_convert(city_tz)
 latest = readings.iloc[0]
 
 if bool(latest["is_anomaly"]):
@@ -120,7 +133,7 @@ st.subheader(f"Comfort score right now: {latest['comfort_score']:.0f} / 100")
 st.progress(min(max(int(latest["comfort_score"]), 0), 100) / 100)
 
 st.subheader("Next 48 hours")
-chart_df = readings.set_index("ts")[["comfort_score"]]
+chart_df = readings.set_index("ts_local")[["comfort_score"]]
 st.line_chart(chart_df, height=260)
 
 best = readings.sort_values("comfort_score", ascending=False).head(3)
@@ -130,11 +143,11 @@ c1, c2 = st.columns(2)
 with c1:
     st.markdown("**Best times to be outside**")
     for _, r in best.iterrows():
-        st.write(f"- {r['ts'].strftime('%a %I:%M %p UTC')} — score {r['comfort_score']:.0f}")
+        st.write(f"- {r['ts_local'].strftime('%a %I:%M %p %Z')} — score {r['comfort_score']:.0f}")
 with c2:
     st.markdown("**Times to avoid**")
     for _, r in worst.iterrows():
-        st.write(f"- {r['ts'].strftime('%a %I:%M %p UTC')} — score {r['comfort_score']:.0f}")
+        st.write(f"- {r['ts_local'].strftime('%a %I:%M %p %Z')} — score {r['comfort_score']:.0f}")
 
 with st.expander("How this works"):
     st.markdown(
@@ -146,7 +159,8 @@ with st.expander("How this works"):
 - **Anomaly flag**: an unsupervised **Isolation Forest** (scikit-learn) is fit per city on that city's own
   accumulated history and flags hours where the *combination* of temperature / UV / AQI / PM2.5 is
   statistically unusual for that location -- not just "hot" or "polluted" in isolation.
-- Data updates hourly. Timestamps shown in UTC.
+- Data updates hourly. All timestamps are stored in UTC and converted to **the selected city's own
+  local time** for display, so "Wed 5:00 PM" always means 5pm in that city, not in UTC or in your browser's time zone.
         """
     )
 
